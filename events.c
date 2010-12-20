@@ -60,13 +60,14 @@ void ev_exit(void)
     }
 }
 
-int ev_get(struct input_event *ev, unsigned dont_wait)
+// BREAKING: changed dont_wait so it can hold a timeout val how many msec to wait
+int ev_get(struct input_event *ev, int wait_amount)
 {
     int r;
     unsigned n;
 
     do {
-        r = poll(ev_fds, ev_count, dont_wait ? 0 : -1);
+        r = poll(ev_fds, ev_count, wait_amount);
 
         if(r > 0) {
             for(n = 0; n < ev_count; n++) {
@@ -76,7 +77,6 @@ int ev_get(struct input_event *ev, unsigned dont_wait)
                 }
             }
         }
-    } while(dont_wait == 0);
-
+    } while(wait_amount == -1);
     return -1;
 }

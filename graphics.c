@@ -51,6 +51,8 @@ static int gr_vt_fd = -1;
 
 static struct fb_var_screeninfo vi;
 
+#define BYTES_PER_PIXEL 4
+
 static int get_framebuffer(GGLSurface *fb)
 {
     int fd;
@@ -81,13 +83,18 @@ static int get_framebuffer(GGLSurface *fb)
         close(fd);
         return -1;
     }
+    printf("%d\n",vi.yres_virtual);
 
     fb->version = sizeof(*fb);
     fb->width = vi.xres;
     fb->height = vi.yres;
     fb->stride = vi.xres;
     fb->data = bits;
+#if BYTES_PER_PIXEL == 4
+    fb->format = GGL_PIXEL_FORMAT_RGBA_8888;
+#else
     fb->format = GGL_PIXEL_FORMAT_RGB_565;
+#endif
 
     fb++;
 
@@ -95,8 +102,12 @@ static int get_framebuffer(GGLSurface *fb)
     fb->width = vi.xres;
     fb->height = vi.yres;
     fb->stride = vi.xres;
-    fb->data = (void*) (((unsigned) bits) + vi.yres * vi.xres * 2);
+    fb->data = (void*) (((unsigned) bits) + vi.yres * vi.xres * BYTES_PER_PIXEL);
+#if BYTES_PER_PIXEL == 4
+    fb->format = GGL_PIXEL_FORMAT_RGBA_8888;
+#else
     fb->format = GGL_PIXEL_FORMAT_RGB_565;
+#endif
 
     return fd;
 }
@@ -106,19 +117,41 @@ static void get_memory_surface(GGLSurface* ms) {
   ms->width = vi.xres;
   ms->height = vi.yres;
   ms->stride = vi.xres;
-  ms->data = malloc(vi.xres * vi.yres * 2);
-  ms->format = GGL_PIXEL_FORMAT_RGB_565;
+  ms->data = malloc(vi.xres * vi.yres * BYTES_PER_PIXEL);
+#if BYTES_PER_PIXEL == 4
+    ms->format = GGL_PIXEL_FORMAT_RGBA_8888;
+#else
+    ms->format = GGL_PIXEL_FORMAT_RGB_565;
+#endif
 }
 
 static void set_active_framebuffer(unsigned n)
 {
     if (n > 1) return;
+//    vi.yres_virtual = vi.yres * BYTES_PER_PIXEL;
     vi.yres_virtual = vi.yres * 2;
     vi.yoffset = n * vi.yres;
-    vi.bits_per_pixel = 16;
+    vi.bits_per_pixel = BYTES_PER_PIXEL * 8;
     if (ioctl(gr_fb_fd, FBIOPUT_VSCREENINFO, &vi) < 0) {
         perror("active fb swap failed");
     }
+}
+
+// switch to the first fb
+void gr_flip_zero()
+{
+    GGLContext *gl = gr_context;
+
+    /* swap front and back buffers */
+    gr_active_fb = 0;
+
+    /* copy data from the in-memory surface to the buffer we're about
+     * to make active. */
+    memcpy(gr_framebuffer[gr_active_fb].data, gr_mem_surface.data,
+           vi.xres * vi.yres * BYTES_PER_PIXEL);
+
+    /* inform the display driver */
+    set_active_framebuffer(gr_active_fb);
 }
 
 void gr_flip(void)
@@ -131,7 +164,7 @@ void gr_flip(void)
     /* copy data from the in-memory surface to the buffer we're about
      * to make active. */
     memcpy(gr_framebuffer[gr_active_fb].data, gr_mem_surface.data,
-           vi.xres * vi.yres * 2);
+           vi.xres * vi.yres * BYTES_PER_PIXEL);
 
     /* inform the display driver */
     set_active_framebuffer(gr_active_fb);
@@ -153,6 +186,63 @@ int gr_measure(const char *s)
     return gr_font->cwidth * strlen(s);
 }
 
+int gr_text_size(const char *s, int *width, int *height)
+{
+  int maxwidth = 0;
+  int maxheight = 0;
+  char* str = s;
+  while (str && *str) {
+    if (str!=s) str++;
+    maxheight++;
+    int pos = strcspn(str,"\n");
+    if (pos>maxwidth) {
+      maxwidth = pos;
+    }
+    str = str+pos;
+  }
+  *width = maxwidth * gr_font->cwidth;
+  *height = maxheight * gr_font->cheight;
+  return 1;
+}
+
+// ax and ay are from -1..1 to detemine alignment of text. -1: right/bottom, 0: center, 1: left/top
+// baseline: whether y is for the baseline or the top of the line
+int gr_text_align(int x, int y, int ax, int ay, int baseline, const char *s)
+{
+  int width;
+  int height;
+  int fl;
+  char *str;
+  gr_text_size(s, &width, &height);
+  if (ay==GR_TEXT_ALIGN_BOTTOM) y-=height;
+  if (ay==GR_TEXT_ALIGN_CENTER) y-=height/2;
+  if (!baseline) y+=gr_font->ascent; // this will be removed by gr_text
+  str = malloc(strlen(s)+1);
+  char *save = str;
+  strcpy(str,s);
+  fl = 0;
+  while (str && *str) {
+    if (fl) str++;
+    int pos = strcspn(str,"\n");
+    int mod = 0; //whether we modified the buffer or not
+    if (*(str+pos)) mod = 1;
+    *(str+pos) = '\0';
+
+    int px = x;
+    if (ax==GR_TEXT_ALIGN_RIGHT) px-=strlen(str)*gr_font->cwidth;
+    if (ax==GR_TEXT_ALIGN_CENTER) px-=strlen(str)*gr_font->cwidth/2;
+
+    gr_text(px,y,str);
+
+    if (mod) *(str+pos) = '\n'; //if we did, restore the original
+    str = str+pos;
+    y += gr_font->cheight;
+    fl = 1;
+  }
+  free(save);
+  return 1;
+}
+
 int gr_text(int x, int y, const char *s)
 {
     GGLContext *gl = gr_context;
@@ -160,6 +250,10 @@ int gr_text(int x, int y, const char *s)
     unsigned off;
 
     y -= font->ascent;
+
+    // don't run this if it won't shown anyway
+    if (y+((int)font->ascent)<0) return 0;
+    if (y-((int)font->ascent)>gr_fb_height()) return 0;
 
     gl->bindTexture(gl, &font->texture);
     gl->texEnvi(gl, GGL_TEXTURE_ENV, GGL_TEXTURE_ENV_MODE, GGL_REPLACE);
@@ -186,6 +280,46 @@ void gr_fill(int x, int y, int w, int h)
     gl->recti(gl, x, y, w, h);
 }
 
+void gr_line(int x, int y, int x2, int y2, int w)
+{
+  GGLContext *gl = gr_context;
+  gl->disable(gl, GGL_TEXTURE_2D);
+  // GGLcoord contains Q28.4 numbers
+  GGLcoord pos1[2];
+  GGLcoord pos2[2];
+  pos1[0] = x<<4;
+  pos1[1] = y<<4;
+  pos2[0] = x2<<4;
+  pos2[1] = y2<<4;
+  w = w<<4;
+  gl->linex(gl, pos1, pos2, w);
+}
+
+void gr_point(int x, int y, int w)
+{
+  GGLContext *gl = gr_context;
+  gl->disable(gl, GGL_TEXTURE_2D);
+  // without this, pixelflinger draws a rectangle
+  gl->enable(gl, GGL_AA);
+  // GGLcoord contains Q28.4 numbers
+  GGLcoord pos[2];
+  pos[0] = x<<4;
+  pos[1] = y<<4;
+  w = w<<4;
+  gl->pointx(gl, pos, w);
+  gl->disable(gl, GGL_AA);
+}
+
+void gr_blend(int enable) {
+  GGLContext *gl = gr_context;
+  if (enable) {
+    gl->enable(gl, GGL_BLEND);
+    gl->blendFunc(gl, GGL_SRC_ALPHA, GGL_ONE_MINUS_SRC_ALPHA);
+  } else {
+    gl->disable(gl, GGL_BLEND);
+  }
+}
+
 void gr_blit(gr_surface source, int sx, int sy, int w, int h, int dx, int dy) {
     if (gr_context == NULL) {
         return;
@@ -199,6 +333,26 @@ void gr_blit(gr_surface source, int sx, int sy, int w, int h, int dx, int dy) {
     gl->enable(gl, GGL_TEXTURE_2D);
     gl->texCoord2i(gl, sx - dx, sy - dy);
     gl->recti(gl, dx, dy, dx + w, dy + h);
+}
+
+// create a new surface the size of the frame buffer
+gr_surface gr_create_surface(void) {
+    GGLSurface* s = malloc(sizeof(GGLSurface));
+    get_memory_surface(s);
+    return (gr_surface *)s;
+}
+
+// free the previous surface
+void gr_free_surface(gr_surface surface) {
+  if (surface) {
+    free(((GGLSurface*)surface)->data);
+    free(surface);
+  }
+}
+
+// save the active surface data to this surface
+void gr_save_active_surface(gr_surface surface) {
+  memcpy(((GGLSurface*)surface)->data, gr_mem_surface.data, vi.xres * vi.yres * BYTES_PER_PIXEL);
 }
 
 unsigned int gr_get_width(gr_surface surface) {
@@ -285,8 +439,21 @@ int gr_init(void)
     return 0;
 }
 
+void gr_crop(int x, int y, int x2, int y2)
+{
+    GGLContext *gl = gr_context;
+    if ((x == y) && (x2 == y2) && (x == x2) && (x == 0)) {
+      gl->disable(gl, GGL_SCISSOR_TEST);
+      gl->scissor(gl,0,0,gr_fb_width(),gr_fb_height());
+    } else {
+      gl->enable(gl, GGL_SCISSOR_TEST);
+      gl->scissor(gl,x,y,x2-x,y2-y);
+    }
+}
+
 void gr_exit(void)
 {
+    gr_flip_zero();
     close(gr_fb_fd);
     gr_fb_fd = -1;
 

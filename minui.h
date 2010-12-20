@@ -20,6 +20,14 @@
 typedef void* gr_surface;
 typedef unsigned short gr_pixel;
 
+#define GR_TEXT_ALIGN_TOP 1
+#define GR_TEXT_ALIGN_CENTER 0
+#define GR_TEXT_ALIGN_BOTTOM -1
+#define GR_TEXT_ALIGN_LEFT 1
+#define GR_TEXT_ALIGN_RIGHT -1
+
+#define BYTES_PER_PIXEL 4
+
 int gr_init(void);
 void gr_exit(void);
 
@@ -30,20 +38,28 @@ void gr_flip(void);
 
 void gr_color(unsigned char r, unsigned char g, unsigned char b, unsigned char a);
 void gr_fill(int x, int y, int w, int h);
+int gr_text_align(int x, int y, int ax, int ay, int baseline, const char *s);
 int gr_text(int x, int y, const char *s);
 int gr_measure(const char *s);
+void gr_line(int x, int y, int x2, int y2, int w);
+void gr_point(int x, int y, int w);
+void gr_crop(int x, int y, int x2, int y2);
 
 void gr_blit(gr_surface source, int sx, int sy, int w, int h, int dx, int dy);
 unsigned int gr_get_width(gr_surface surface);
 unsigned int gr_get_height(gr_surface surface);
 
+void gr_blend(int enable);
+gr_surface gr_create_surface(void);
+void gr_free_surface(gr_surface surface);
+void gr_save_active_surface(gr_surface surface);
 // input event structure, include <linux/input.h> for the definition.
 // see http://www.mjmwired.net/kernel/Documentation/input/ for info.
 struct input_event;
 
 int ev_init(void);
 void ev_exit(void);
-int ev_get(struct input_event *ev, unsigned dont_wait);
+int ev_get(struct input_event *ev, int wait_amount);
 
 // Resources
 
