@@ -51,8 +51,6 @@ static int gr_vt_fd = -1;
 
 static struct fb_var_screeninfo vi;
 
-#define BYTES_PER_PIXEL 4
-
 static int get_framebuffer(GGLSurface *fb)
 {
     int fd;
